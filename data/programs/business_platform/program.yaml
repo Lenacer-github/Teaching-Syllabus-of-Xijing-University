@@ -1,0 +1,9 @@
+code: business_platform
+name: 商学院平台课程
+type: platform
+related_programs:
+  - dianshang
+  - guomao
+  - chengguan
+  - bigdata
+  - jinrong

@@ -1,0 +1,25 @@
+rules:
+  - id: R-BASIC-001
+    name: 课程类别合法性
+    priority: 高
+    scope: 课程基本信息表
+  - id: R-BASIC-004
+    name: 学分与学时对应关系
+    priority: 高
+    scope: 课程基本信息表
+  - id: R-ASSESS-001
+    name: OBE考核项合规性
+    priority: 高
+    scope: 考核方式
+  - id: R-GRAD-001
+    name: 毕业要求支撑关系完整性
+    priority: 高
+    scope: 课程目标与毕业要求的关系表
+  - id: R-HOUR-001
+    name: 学时单元规范
+    priority: 中
+    scope: 教学内容与学时
+  - id: R-RESOURCE-001
+    name: 课程资源标题规范
+    priority: 中
+    scope: 课程资源
