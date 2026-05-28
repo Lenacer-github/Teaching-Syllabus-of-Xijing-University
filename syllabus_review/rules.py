@@ -53,6 +53,18 @@ COURSE_CATEGORIES = {"通识教育课程", "公共基础课程", "专业教育�
 COURSE_NATURES = {"必修", "选修"}
 TERMS = {f"第{i}学期" for i in range(1, 9)}
 HOURS_PER_PRACTICE_WEEK = 30
+REQUIREMENT_NAME_TO_ID = {
+    "思想品德": "毕业要求1",
+    "思想道德": "毕业要求1",
+    "学科知识": "毕业要求2",
+    "应用能力": "毕业要求3",
+    "创新能力": "毕业要求4",
+    "信息能力": "毕业要求5",
+    "沟通表达": "毕业要求6",
+    "团队合作": "毕业要求7",
+    "国际视野": "毕业要求8",
+    "学习发展": "毕业要求9",
+}
 AI_REVIEW_SYSTEM_PROMPT = """你是高校教学大纲语义质检专家。请只做内容深度审查，不审查格式、页边距、学时计算、表格边框等可由程序规则判断的问题。
 
 请重点关注以下六类问题：
@@ -141,6 +153,15 @@ def _contains_week_unit(value: str | None) -> bool:
         return False
     text = str(value)
     return bool(re.search(r"\d+(?:\.\d+)?\s*周", text)) and not bool(re.search(r"\d+(?:\.\d+)?\s*学时", text))
+
+
+def _find_hour_per_week_fields(fields: dict[str, str | None]) -> list[str]:
+    values: list[str] = []
+    for label, value in fields.items():
+        text = _safe_cell_text(value)
+        if re.search(r"学时\s*/\s*周", text):
+            values.append(f"{label}“{text}”")
+    return values
 
 
 def _check_core_tables(text: str, result: ReviewResult) -> None:
@@ -253,6 +274,22 @@ def _check_basic_info(text: str, context: ReviewContext, result: ReviewResult) -
         )
     if term and term not in TERMS:
         _add(result, "R-BASIC-003", "中", "课程基本信息表", f"开课学期“{term}”不符合规范。", "请使用“第1学期”至“第8学期”的标准写法。")
+    hour_unit_problems = _find_hour_per_week_fields(
+        {
+            "总学时": total_hours_text,
+            "理论学时": theory_hours_text,
+            "实践学时": practice_hours_text,
+        }
+    )
+    if hour_unit_problems:
+        _add(
+            result,
+            "R-BASIC-009",
+            "高",
+            "课程基本信息表",
+            "学时字段不应写成“学时/周”：" + "；".join(hour_unit_problems) + "。",
+            "请删除“/周”，直接填写总学时、理论学时、实践学时，例如“48学时”。",
+        )
     if credit and total_hours and not has_catalog_standards and not _contains_week_unit(total_hours_text) and abs(total_hours - credit * 16) > 0.01:
         _add(result, "R-BASIC-004", "高", "课程基本信息表", f"学分与总学时不匹配：{credit} 学分对应应为 {credit * 16:g} 学时，文档为 {total_hours:g}。", "除集中实践课程外，请按 1 学分=16 学时修正。")
     if total_hours is not None and theory_hours is not None and practice_hours is not None and abs(total_hours - theory_hours - practice_hours) > 0.01:
@@ -612,10 +649,11 @@ def _check_platform_graduation_support(text: str, context: ReviewContext, result
 
     code = _find_field(text, ["课程代码", "课程编号"])
     name = _find_field(text, ["课程名称"])
+    plan_courses: dict[str, object] = {}
+    expected_supports: dict[str, dict[str, str]] = {}
     for index, program_code in enumerate(related_codes):
         program_name = context.program_names.get(program_code, program_code)
         plan = context.training_plans.get(program_code)
-        table_support_details = support_tables[index] if index < len(support_tables) else {}
         if not plan or not plan.available:
             _add(result, "R-PLAN-001", "低", f"{program_name}人才培养方案", f"未找到{program_name}的人才培养方案 PDF，跳过该专业一致性审查。", "请将对应专业人才培养方案 PDF 放在 data/programs/<专业代码>/training_plan.pdf。")
             continue
@@ -623,11 +661,24 @@ def _check_platform_graduation_support(text: str, context: ReviewContext, result
         if not plan_course:
             _add(result, "R-PLAN-004", "中", f"{program_name}人才培养方案", f"未能在{program_name}人才培养方案中匹配到该平台课程。", "请核对课程代码、课程名称是否与该专业人才培养方案一致。")
             continue
+        plan_courses[program_code] = plan_course
+        expected_supports[program_code] = {key: value for key, value in plan_course.support.items() if value}
+
+    support_assignments = _match_platform_support_tables(support_tables, expected_supports)
+    has_missing_platform_table = len(support_tables) < len(related_codes)
+
+    for program_code in related_codes:
+        if program_code not in plan_courses:
+            continue
+        program_name = context.program_names.get(program_code, program_code)
+        table_support_details = support_assignments.get(program_code, {})
+        plan = context.training_plans.get(program_code)
         if not table_support_details:
-            _add(result, "R-GRAD-003", "中", f"{program_name}课程目标与毕业要求的关系表", f"未能从大纲中识别出{program_name}对应的毕业要求支撑关系。", "请确认平台课程中该专业对应表格包含毕业要求编号和 H/M/L 支撑强度。")
+            if not has_missing_platform_table:
+                _add(result, "R-GRAD-003", "中", f"{program_name}课程目标与毕业要求的关系表", f"未能从大纲中识别出{program_name}对应的毕业要求支撑关系。", "请确认平台课程中该专业对应表格包含毕业要求编号和 H/M/L 支撑强度。")
             continue
         actual = {key: value["strength"] for key, value in table_support_details.items() if value.get("strength")}
-        expected = {key: value for key, value in plan_course.support.items() if value}
+        expected = expected_supports.get(program_code, {})
         if expected and actual != expected:
             _add(
                 result,
@@ -662,6 +713,44 @@ def _extract_graduation_support_tables(
         if support:
             support_tables.append(support)
     return support_tables
+
+
+def _match_platform_support_tables(
+    support_tables: list[dict[str, dict[str, str]]],
+    expected_supports: dict[str, dict[str, str]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    candidates: list[tuple[int, str, int]] = []
+    for program_code, expected in expected_supports.items():
+        if not expected:
+            continue
+        for index, support in enumerate(support_tables):
+            score = _support_table_match_score(support, expected)
+            if score > 0:
+                candidates.append((score, program_code, index))
+    candidates.sort(reverse=True, key=lambda item: item[0])
+
+    assignments: dict[str, dict[str, dict[str, str]]] = {}
+    used_tables: set[int] = set()
+    used_programs: set[str] = set()
+    for _, program_code, index in candidates:
+        if program_code in used_programs or index in used_tables:
+            continue
+        assignments[program_code] = support_tables[index]
+        used_programs.add(program_code)
+        used_tables.add(index)
+    return assignments
+
+
+def _support_table_match_score(support: dict[str, dict[str, str]], expected: dict[str, str]) -> int:
+    actual = {key: value.get("strength", "") for key, value in support.items() if value.get("strength")}
+    if not actual or not expected:
+        return 0
+    matching = sum(1 for key, value in actual.items() if expected.get(key) == value)
+    wrong = sum(1 for key, value in actual.items() if key in expected and expected.get(key) != value)
+    extra = len(set(actual) - set(expected))
+    missing = len(set(expected) - set(actual))
+    exact_bonus = 100 if actual == expected else 0
+    return exact_bonus + matching * 4 - wrong * 3 - extra - missing
 
 
 def _extract_support_details_from_table(table: tuple[tuple[str, ...], ...]) -> dict[str, dict[str, str]]:
@@ -1238,6 +1327,7 @@ def _extract_requirement_name(value: str) -> str:
 
 def _extract_requirement_details(value: str) -> list[dict[str, str]]:
     details: list[dict[str, str]] = []
+    clean_value = _clean_label(value)
     pattern = re.compile(r"(?:毕业要求|指标点)?\s*(\d+(?:\.\d+)?)\s*[.．、]?\s*([\u4e00-\u9fa5]{2,12})?")
     for match in pattern.finditer(value):
         name = (match.group(2) or "").strip()
@@ -1246,6 +1336,13 @@ def _extract_requirement_details(value: str) -> list[dict[str, str]]:
         if name and re.search(r"课程目标|学时|分数|优秀|良好|合格|不合格", name):
             continue
         details.append({"id": f"毕业要求{match.group(1)}", "name": name})
+    if details:
+        return details
+    if 2 <= len(clean_value) <= 12:
+        for name, requirement_id in REQUIREMENT_NAME_TO_ID.items():
+            if name in clean_value:
+                details.append({"id": requirement_id, "name": name})
+                break
     return details
 
 
@@ -1360,7 +1457,7 @@ def _find_field_in_tables(text: str, names: list[str]) -> str | None:
 
 def _next_table_value(cells: list[str], start: int, labels: set[str]) -> str | None:
     for cell in cells[start + 1 :]:
-        value = cell.strip()
+        value = _strip_embedded_table_label(cell.strip())
         clean = _clean_label(value)
         if not value or clean in labels:
             continue
@@ -1368,6 +1465,13 @@ def _next_table_value(cells: list[str], start: int, labels: set[str]) -> str | N
             break
         return value
     return None
+
+
+def _strip_embedded_table_label(value: str) -> str:
+    if not value:
+        return ""
+    match = re.match(r"^[^：:|]{1,20}[：:]\s*(.+)$", value)
+    return match.group(1).strip() if match else value
 
 
 def _clean_label(value: str) -> str:
