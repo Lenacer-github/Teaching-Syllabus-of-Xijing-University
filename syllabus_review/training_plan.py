@@ -270,14 +270,15 @@ def _extract_courses_from_layout_text(text: str) -> list[PlanCourse]:
 def _extract_support_matrix_from_layout_text(text: str) -> list[PlanCourse]:
     courses: list[PlanCourse] = []
     support_columns: list[tuple[int, str]] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         detected_columns = _detect_support_columns(line)
         if detected_columns:
             support_columns = detected_columns
             continue
         if not support_columns:
             continue
-        course = _extract_support_matrix_row(line, support_columns)
+        course = _extract_support_matrix_row(_support_matrix_candidate_line(lines, index), support_columns)
         if course:
             courses.append(course)
     return courses
@@ -305,7 +306,7 @@ def _extract_layout_course_row(line: str, term_columns: list[tuple[int, str]]) -
         return None
     match = re.search(
         r"^\s*(?:[\u4e00-\u9fa5]{1,8})?\s*(?:必修|选修)?\s*\d{1,3}\s+"
-        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》·、\-]+?)\s{2,}"
+        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》“”·、+\-\s]+?)\s{2,}"
         r"\d+(?:\.\d+)?\s+",
         line,
     )
@@ -331,14 +332,14 @@ def _extract_support_matrix_row(line: str, support_columns: list[tuple[int, str]
     if re.search(r"小计|合计|总计|注：|毕业要求|培养目标", line):
         return None
     match = re.search(
-        r"^\s*\d{1,3}\s+"
-        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》·、#*\-\s]+?)\s{2,}(?=[HML\s]+$)",
+        r"^\s*\d{1,3}\s*"
+        r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》“”·、+#*\-\s]+?)\s{2,}(?=[HML\s]+$)",
         line,
     )
     if not match:
         match = re.search(
-            r"^\s*\d{1,3}\s+"
-            r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》·、#*\-]+?)\s{2,}",
+            r"^\s*\d{1,3}\s*"
+            r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()《》“”·、+#*\-\s]+?)\s{2,}",
             line,
         )
     if not match:
@@ -356,6 +357,41 @@ def _extract_support_matrix_row(line: str, support_columns: list[tuple[int, str]
     if not support:
         return None
     return PlanCourse(name=name, support=support)
+
+
+def _support_matrix_candidate_line(lines: list[str], index: int) -> str:
+    line = lines[index]
+    if re.search(r"\b[HML]\b", line):
+        return line
+    if index + 1 >= len(lines) or not re.search(r"\b[HML]\b", lines[index + 1]):
+        return line
+    prefix = _clean_wrapped_course_fragment(line)
+    if not prefix:
+        return line
+    suffix = _clean_wrapped_course_fragment(lines[index + 2], min_length=1) if index + 2 < len(lines) else ""
+    name = prefix + suffix
+    if not _looks_like_course("", name):
+        return line
+    support_line = lines[index + 1]
+    strength_match = re.search(r"\b[HML]\b", support_line)
+    number_match = re.match(r"^(\s*\d{1,3})", support_line)
+    if not strength_match or not number_match:
+        return line
+    head = f"{number_match.group(1)}   {name}"
+    strength_start = strength_match.start()
+    if len(head) >= strength_start:
+        return f"{head}  {support_line[strength_start:]}"
+    return head + (" " * (strength_start - len(head))) + support_line[strength_start:]
+
+
+def _clean_wrapped_course_fragment(line: str, *, min_length: int = 2) -> str:
+    text = re.sub(r"\s+", "", line or "").strip()
+    if not text or re.search(r"\b[HML]\b|毕业要求|课程名称|小计|合计|总计", text):
+        return ""
+    text = re.sub(r"^\d{1,3}", "", text)
+    if len(text) < min_length:
+        return ""
+    return text if re.search(r"[\u4e00-\u9fa5A-Za-z]", text) else ""
 
 
 def _nearest_term_for_position(position: int, term_columns: list[tuple[int, str]]) -> str:
@@ -480,7 +516,8 @@ def _normalize_requirement_id(value: str) -> str:
 
 
 def _clean(value: str | None) -> str:
-    return re.sub(r"\s+", "", str(value or "")).strip()
+    text = re.sub(r"\s+", "", str(value or "")).strip()
+    return re.sub(r"[“”‘’\"'《》#*]", "", text)
 
 
 def _normalize_course_code(value: str | None) -> str:
