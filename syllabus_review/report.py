@@ -265,7 +265,7 @@ def _report_issues(issues: list[Issue]) -> list[Issue]:
             issue.rule_id,
             issue.priority,
             issue.location,
-            _short_issue_message(issue.message),
+            _report_issue_message(issue),
             issue.suggestion,
         )
         for issue in high_priority
@@ -279,7 +279,7 @@ def _report_issues(issues: list[Issue]) -> list[Issue]:
                     first.rule_id,
                     priority,
                     first.location,
-                    _short_issue_message(first.message),
+                    _report_issue_message(first),
                     first.suggestion,
                 )
             )
@@ -289,7 +289,7 @@ def _report_issues(issues: list[Issue]) -> list[Issue]:
                 first.rule_id,
                 priority,
                 first.location,
-                f"同类问题共 {len(group)} 处。示例：{first.location}，{_short_issue_message(first.message)}请自行校对其他部分存在的相似问题。",
+                f"同类问题共 {len(group)} 处。示例：{first.location}，{_report_issue_message(first)}请自行校对其他部分存在的相似问题。",
                 first.suggestion,
             )
         )
@@ -306,6 +306,12 @@ def _issue_group_key(issue: Issue) -> str:
 
 def _priority_rank(priority: str) -> int:
     return {"低": 1, "中": 2, "高": 3}.get(priority, 0)
+
+
+def _report_issue_message(issue: Issue) -> str:
+    if issue.rule_id == "R-GRAD-004":
+        return _ensure_sentence(re.sub(r"\s+", " ", issue.message or "").strip())
+    return _short_issue_message(issue.message)
 
 
 def _short_issue_message(message: str) -> str:
