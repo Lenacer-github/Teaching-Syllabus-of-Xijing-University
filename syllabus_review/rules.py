@@ -93,6 +93,7 @@ def run_compliance_review(context: ReviewContext) -> ReviewResult:
     result.course_code = _find_field(text, ["课程代码", "课程编号"]) or ""
     result.course_total_hours = _find_field(text, ["总学时"]) or ""
 
+    _check_syllabus_title(text, result)
     _check_core_tables(text, result)
     _check_basic_info(text, context, result)
     _check_assessment(text, context, result)
@@ -117,6 +118,50 @@ def _add(result: ReviewResult, rule_id: str, priority: Priority, location: str, 
     result.compliance_issues.append(Issue(rule_id, priority, location, message, suggestion))
 
 
+def _check_syllabus_title(text: str, result: ReviewResult) -> None:
+    title = _find_syllabus_title_line(text)
+    if title and _is_standard_syllabus_title(title):
+        return
+    if title:
+        message = f"大纲标题“{title}”不符合模板要求。"
+    else:
+        message = "未识别到符合模板要求的大纲标题。"
+    _add(
+        result,
+        "R-FORMAT-113",
+        "高",
+        "大纲标题",
+        message,
+        "大纲标题应严格写为“西京学院《课程名称》本科课程教学大纲（2026版）”。",
+    )
+
+
+def _find_syllabus_title_line(text: str) -> str:
+    lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip("|").strip()
+        line = re.sub(r"^#+\s*", "", line).strip("* ")
+        if not line or set(line) <= {"-", ":", "：", " "}:
+            continue
+        if "课程基本信息" in line or re.match(r"^一、", line):
+            break
+        lines.append(line)
+        if len(lines) >= 20:
+            break
+    for line in lines:
+        if "西京学院" in line and "教学大纲" in line:
+            return line
+    for line in lines:
+        if "教学大纲" in line:
+            return line
+    return ""
+
+
+def _is_standard_syllabus_title(value: str) -> bool:
+    compact = re.sub(r"[*#]", "", re.sub(r"\s+", "", value or ""))
+    return bool(re.fullmatch(r"西京学院《[^《》]+》本科课程教学大纲（2026版）", compact))
+
+
 def _find_field(text: str, names: list[str]) -> str | None:
     table_value = _find_field_in_tables(text, names)
     if table_value:
@@ -133,6 +178,25 @@ def _number(value: str | None) -> float | None:
         return None
     match = re.search(r"\d+(?:\.\d+)?", str(value))
     return float(match.group(0)) if match else None
+
+
+def _is_blank(value: str | None) -> bool:
+    return value is None or not re.sub(r"\s+", "", str(value))
+
+
+def _parse_formulated_year_month(value: str | None) -> tuple[int, int] | None:
+    if _is_blank(value):
+        return None
+    text = str(value).strip()
+    normalized = re.sub(r"\s+", "", text)
+    match = re.search(r"(20\d{2})\s*(?:年|[./\-])\s*(\d{1,2})\s*(?:月)?", normalized)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if month < 1 or month > 12:
+        return None
+    return year, month
 
 
 def _hour_number(value: str | None) -> float | None:
@@ -246,6 +310,7 @@ def _check_basic_info(text: str, context: ReviewContext, result: ReviewResult) -
     category = _find_field(text, ["课程类别", "课程分类"])
     nature = _find_field(text, ["课程性质"])
     term = _normalize_term_value(_find_field(text, ["开课学期"]))
+    formulated_time = _find_field(text, ["制定时间"])
     credit = _number(_find_field(text, ["学分"]))
     total_hours_text = _find_field(text, ["总学时"])
     theory_hours_text = _find_field(text, ["理论学时"])
@@ -284,6 +349,13 @@ def _check_basic_info(text: str, context: ReviewContext, result: ReviewResult) -
         )
     if term and term not in TERMS:
         _add(result, "R-BASIC-003", "中", "课程基本信息表", f"开课学期“{term}”不符合规范。", "请使用“第1学期”至“第8学期”的标准写法。")
+    formulated_date = _parse_formulated_year_month(formulated_time)
+    if _is_blank(formulated_time):
+        _add(result, "R-BASIC-010", "高", "课程基本信息表", "制定时间未填写。", "请填写 2026年4月及之后的制定时间，例如“2026年4月”或“2026.4”。")
+    elif formulated_date is None:
+        _add(result, "R-BASIC-010", "高", "课程基本信息表", f"制定时间“{formulated_time}”格式不规范。", "请填写到年月，且时间不得早于 2026年4月，例如“2026年4月”或“2026.4”。")
+    elif formulated_date < (2026, 4):
+        _add(result, "R-BASIC-010", "高", "课程基本信息表", f"制定时间“{formulated_time}”早于学校启动 2026 版教学大纲制定工作的时间。", "制定时间应为 2026年4月及之后，不得填写 2025.9 等早于 2026年4月的时间。")
     hour_unit_problems = _find_hour_per_week_fields(
         {
             "总学时": total_hours_text,
@@ -873,7 +945,7 @@ def _check_teaching_hours(text: str, context: ReviewContext, result: ReviewResul
         )
     hour_values = re.findall(r"(?:理论学时|实践学时|实验学时)\s*[:：]?\s*(\d+)(?!\s*[周天])", text)
     odd_values = [value for value in hour_values if int(value) % 2 != 0]
-    if odd_values:
+    if odd_values and not _is_relaxed_practice_hour_course(text, context):
         _add(result, "R-HOUR-001", "中", "教学内容与学时", f"存在非 2 的倍数学时：{', '.join(odd_values[:8])}。", "建议理论学时和实践学时均按 2 学时单元划分。")
     if not re.search(r"课程思政|劳育|美育", text):
         _add(result, "R-HOUR-003", "中", "教学内容", "未识别到课程思政、劳育或美育相关内容。", "每个知识模块建议至少体现课程思政、劳育、美育三者之一。")
@@ -888,6 +960,13 @@ def _is_practice_education_course(text: str, context: ReviewContext) -> bool:
     if catalog_row is not None and _canonical_compare_text(_safe_cell_text(catalog_row.get("课程类别", ""))) == "实践教育课程":
         return True
     return False
+
+
+def _is_relaxed_practice_hour_course(text: str, context: ReviewContext) -> bool:
+    if not _is_practice_education_course(text, context):
+        return False
+    name = _canonical_compare_text(_find_field(text, ["课程名称"]) or "")
+    return any(keyword in name for keyword in ["毕业设计", "毕业论文", "毕业实习", "认知实习"])
 
 
 def _find_non_hour_teaching_units(text: str, tables: tuple[tuple[tuple[str, ...], ...], ...]) -> list[str]:
