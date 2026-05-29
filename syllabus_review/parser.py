@@ -5,9 +5,10 @@ import shutil
 import subprocess
 import tempfile
 import re
+import io
 from dataclasses import dataclass
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile, ZIP_DEFLATED
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
@@ -131,10 +132,22 @@ def parse_docx(file_name: str, content: bytes) -> ParsedDocument:
 
 
 def _parse_docx_locally(file_name: str, content: bytes) -> ParsedDocument:
+    parser_name = "python-docx"
     with tempfile.NamedTemporaryFile(suffix=".docx") as temp:
         temp.write(content)
         temp.flush()
-        document = Document(temp.name)
+        try:
+            document = Document(temp.name)
+        except BadZipFile:
+            repaired_content = _repair_docx_without_bad_parts(content)
+            if repaired_content is None:
+                raise
+            temp.seek(0)
+            temp.truncate()
+            temp.write(repaired_content)
+            temp.flush()
+            document = Document(temp.name)
+            parser_name = "python-docx-repaired"
         format_findings = _inspect_docx_cleanliness(temp.name)
         format_rule_findings = _inspect_docx_format(document)
 
@@ -158,11 +171,62 @@ def _parse_docx_locally(file_name: str, content: bytes) -> ParsedDocument:
         file_name=file_name,
         text=markdown,
         markdown=markdown,
-        parser_name="python-docx",
+        parser_name=parser_name,
         format_findings=tuple(format_findings),
         format_rule_findings=tuple(format_rule_findings),
         tables=tuple(tables),
     )
+
+
+def _repair_docx_without_bad_parts(content: bytes) -> bytes | None:
+    output = io.BytesIO()
+    skipped: set[str] = set()
+    copied: list[tuple[str, bytes]] = []
+    try:
+        with ZipFile(io.BytesIO(content)) as source:
+            for info in source.infolist():
+                try:
+                    copied.append((info.filename, source.read(info.filename)))
+                except BadZipFile:
+                    skipped.add(info.filename)
+    except BadZipFile:
+        return None
+
+    if not skipped:
+        return None
+
+    with ZipFile(output, "w", ZIP_DEFLATED) as target:
+        for filename, data in copied:
+            if filename in skipped:
+                continue
+            if filename.endswith(".rels"):
+                data = _remove_rels_to_skipped_parts(filename, data, skipped)
+            target.writestr(filename, data)
+    return output.getvalue()
+
+
+def _remove_rels_to_skipped_parts(rels_filename: str, data: bytes, skipped: set[str]) -> bytes:
+    try:
+        xml = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    base_dir = str(Path(rels_filename).parent.parent)
+    if base_dir == ".":
+        base_dir = ""
+
+    def should_remove(match: re.Match[str]) -> bool:
+        relationship = match.group(0)
+        target_match = re.search(r'Target="([^"]+)"', relationship)
+        if not target_match:
+            return False
+        target = target_match.group(1)
+        if re.match(r"^[a-z]+:", target) or target.startswith("/"):
+            return False
+        normalized = str(Path(base_dir, target)).replace("\\", "/")
+        return normalized in skipped
+
+    xml = re.sub(r"<Relationship\b[^>]*/>", lambda match: "" if should_remove(match) else match.group(0), xml)
+    return xml.encode("utf-8")
 
 
 def _merge_tables(
@@ -422,25 +486,12 @@ def _inspect_table_titles(document: Document) -> list[FormatFinding]:
 
 
 def _inspect_table_format(document: Document) -> list[FormatFinding]:
-    missing_border_tables: list[str] = []
     font_size_cells: list[str] = []
     table_titles = _table_titles(document)
     for index, table in enumerate(document.tables, start=1):
-        if not _table_has_full_borders(table):
-            missing_border_tables.append(f"第{index}个表格")
         font_size_cells.extend(_table_font_size_findings(table, table_titles.get(index, f"第{index}个表格")))
 
     findings: list[FormatFinding] = []
-    if missing_border_tables:
-        findings.append(
-            FormatFinding(
-                "R-FORMAT-109",
-                "中",
-                "表格格式",
-                "表格疑似缺少完整内外边框：" + "、".join(missing_border_tables[:8]) + "。",
-                "请为所有表格设置完整外边框和内部横线、竖线。",
-            )
-        )
     if font_size_cells:
         findings.append(
             FormatFinding(

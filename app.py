@@ -25,6 +25,9 @@ from syllabus_review.training_plan import load_training_plan
 ROOT = Path(__file__).parent
 LOCAL_REVIEW_MAX_FILES = 100
 AI_REVIEW_MAX_FILES = 10
+SPECIAL_PLATFORM_COURSE_PROGRAMS = {
+    "习近平经济思想概论": ("jinrong", "guomao"),
+}
 
 
 def patch_streamlit_uploader_frontend() -> None:
@@ -118,6 +121,93 @@ def cached_training_plans(program_codes: tuple[str, ...], fingerprint: tuple[tup
 
 def review_program_codes(program) -> tuple[str, ...]:
     return program.related_programs if program.is_platform else (program.code,)
+
+
+def review_program_codes_for_document(program, text: str, programs: dict[str, object]) -> tuple[str, ...]:
+    if not program.is_platform:
+        return (program.code,)
+    configured_codes = tuple(program.related_programs)
+    applicable_codes = extract_applicable_program_codes(text, programs, configured_codes)
+    return applicable_codes or configured_codes
+
+
+def extract_applicable_program_codes(text: str, programs: dict[str, object], allowed_codes: tuple[str, ...]) -> tuple[str, ...]:
+    normalized_text = normalize_program_detection_text(text)
+    for course_name, program_codes in SPECIAL_PLATFORM_COURSE_PROGRAMS.items():
+        if normalize_program_detection_text(course_name) in normalized_text:
+            return tuple(code for code in program_codes if code in allowed_codes)
+
+    scope = extract_applicable_program_scope(text)
+    if not scope:
+        return ()
+    normalized_scope = normalize_program_detection_text(scope)
+    matches: list[str] = []
+    for code in allowed_codes:
+        program = programs.get(code)
+        if not program:
+            continue
+        normalized_name = normalize_program_detection_text(program.name)
+        if normalized_name and normalized_name in normalized_scope:
+            matches.append(code)
+    return tuple(dict.fromkeys(matches))
+
+
+def extract_applicable_program_scope(text: str) -> str:
+    table_scope = extract_table_field_values(text, ["适用专业", "制定依据"])
+    if table_scope:
+        return table_scope
+    normalized = re.sub(r"[ \t]+", " ", text or "")
+    patterns = [
+        r"适用专业\s*[:：]?\s*(.{0,500}?)(?:\n\s*(?:制定依据|二、|三、|课程目标|课程基本信息|表\s*\d)|$)",
+        r"制定依据\s*[:：]?\s*(.{0,800}?)(?:\n\s*(?:二、|三、|课程目标|课程基本信息|表\s*\d)|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.S)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def extract_table_field_values(text: str, labels: list[str]) -> str:
+    wanted = {normalize_program_detection_text(label) for label in labels}
+    stop_labels = {
+        normalize_program_detection_text(label)
+        for label in [
+            "课程名称",
+            "课程代码",
+            "课程类别",
+            "课程性质",
+            "开课学期",
+            "学分",
+            "总学时",
+            "理论学时",
+            "实践学时",
+            "先修课程",
+            "后续课程",
+            "后修课程",
+            "制定时间",
+        ]
+    }
+    values: list[str] = []
+    for line in text.splitlines():
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        for index, cell in enumerate(cells):
+            if normalize_program_detection_text(cell) not in wanted:
+                continue
+            for value in cells[index + 1 :]:
+                clean_value = value.strip()
+                normalized_value = normalize_program_detection_text(clean_value)
+                if not clean_value or normalized_value in wanted:
+                    continue
+                if normalized_value in stop_labels:
+                    break
+                if clean_value not in values:
+                    values.append(clean_value)
+            if values:
+                return "；".join(values)
+    return ""
 
 
 def detect_program_code_from_document(text: str, programs: dict[str, object]) -> str | None:
@@ -374,7 +464,7 @@ def main() -> None:
                     continue
 
                 program = programs[program_code]
-                related_program_codes = review_program_codes(program)
+                related_program_codes = review_program_codes_for_document(program, parsed.text, programs)
                 training_plans = cached_training_plans(related_program_codes, training_plans_fingerprint(related_program_codes))
                 training_plan = training_plans.get(program_code) if not program.is_platform else None
 
@@ -404,6 +494,7 @@ def main() -> None:
                     training_plan=training_plan,
                     training_plans=training_plans,
                     program_names={code: config.name for code, config in programs.items()},
+                    platform_related_programs=related_program_codes if program.is_platform else (),
                     enable_ai_review=enable_ai,
                 )
                 result = run_compliance_review(context)

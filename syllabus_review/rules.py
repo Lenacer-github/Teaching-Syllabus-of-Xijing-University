@@ -34,6 +34,7 @@ class ReviewContext:
     training_plan: TrainingPlan | None = None
     training_plans: dict[str, TrainingPlan] = field(default_factory=dict)
     program_names: dict[str, str] = field(default_factory=dict)
+    platform_related_programs: tuple[str, ...] = ()
     enable_ai_review: bool = False
 
 
@@ -251,7 +252,10 @@ def _check_core_tables(text: str, result: ReviewResult) -> None:
         status = _core_table_status(text, titles, body_keywords)
         title = titles[0]
         if status == "missing_title":
-            _add(result, rule_id, "高", "全文", f"识别到“{title}”相关表格内容，但缺少规范表名或表头。", "请保留模板中的完整表名和表头，不要删除表格标题。")
+            suggestion = "请保留模板中的完整表名和表头，不要删除表格标题。"
+            if rule_id == "R-TABLE-006":
+                suggestion = "请分课程目标分别撰写考核方式的评分标准，表格命名为“课程目标X的评分标准”。请保留模板中的完整表名和表头，不要删除表格标题。"
+            _add(result, rule_id, "高", "全文", f"识别到“{title}”相关表格内容，但缺少规范表名或表头。", suggestion)
         elif status == "missing":
             _add(result, rule_id, "高", "全文", f"未识别到“{title}”相关核心表格。", "请补充该表格，或检查表格标题是否与模板一致。")
 
@@ -711,7 +715,7 @@ def _check_platform_graduation_support(text: str, context: ReviewContext, result
         if _clean_label(column) not in _clean_label(text):
             _add(result, "R-GRAD-001", "高", "课程目标与毕业要求的关系表", f"缺少“{column}”列或字段。", "请补齐支撑关系表的四个必需字段。")
 
-    related_codes = list(context.program.related_programs)
+    related_codes = list(context.platform_related_programs or context.program.related_programs)
     support_tables = _extract_graduation_support_tables(context.parsed.tables)
     if len(support_tables) < len(related_codes):
         _add(
