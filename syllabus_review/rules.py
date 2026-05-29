@@ -1433,6 +1433,10 @@ def _values_differ(actual: object, expected: str) -> bool:
     expected_number = _number(expected)
     actual_number = _number(actual_text)
     if expected_number is not None and actual_number is not None and _looks_numeric(expected):
+        if re.search(r"学时|周", actual_text):
+            actual_number = _hour_number(actual_text)
+            if actual_number is None:
+                return False
         return abs(actual_number - expected_number) > 0.001
     return _canonical_compare_text(actual_text) != _canonical_compare_text(expected)
 
