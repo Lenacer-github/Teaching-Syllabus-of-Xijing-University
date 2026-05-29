@@ -253,7 +253,17 @@ def _check_basic_info(text: str, context: ReviewContext, result: ReviewResult) -
     total_hours = _hour_number(total_hours_text)
     theory_hours = _hour_number(theory_hours_text)
     practice_hours = _hour_number(practice_hours_text)
-    catalog_row = _find_catalog_row(context.course_catalog, code)
+    preferred_catalog_values = {
+        "课程名称": name,
+        "课程类别": category,
+        "课程性质": nature,
+        "开课学期": term,
+        "学分": credit,
+        "总学时": total_hours_text,
+        "理论学时": theory_hours_text,
+        "实践学时": practice_hours_text,
+    }
+    catalog_row = _find_catalog_row(context.course_catalog, code, name, preferred_catalog_values)
     has_catalog_standards = catalog_row is not None
     expected_category = _safe_cell_text(catalog_row.get("课程类别", "")) if catalog_row is not None else ""
     expected_nature = _safe_cell_text(catalog_row.get("课程性质", "")) if catalog_row is not None else ""
@@ -313,17 +323,10 @@ def _check_basic_info(text: str, context: ReviewContext, result: ReviewResult) -
             _add(result, "R-BASIC-007", "高", "课程基本信息表", f"课程代码“{code}”未出现在课程编码表中。", "建议核查课程代码。")
         else:
             expected = catalog_row
-            comparisons = {
-                "课程名称": name,
-                "课程类别": category,
-                "课程性质": nature,
-                "开课学期": term,
-                "学分": credit,
-                "总学时": total_hours,
-                "理论学时": theory_hours,
-                "实践学时": practice_hours,
-            }
+            comparisons = dict(preferred_catalog_values)
             for column, actual in comparisons.items():
+                if _should_skip_week_hour_catalog_compare(column, actual, category, name, expected_category):
+                    continue
                 expected_value = _safe_cell_text(expected.get(column, ""))
                 if _values_differ(actual, expected_value):
                     _add(
@@ -585,7 +588,8 @@ def _check_graduation_support(text: str, context: ReviewContext, result: ReviewR
     if not plan_course:
         return
 
-    syllabus_support_details = _extract_syllabus_support_details(text)
+    graduation_support_tables = _extract_graduation_support_tables(context.parsed.tables)
+    syllabus_support_details = graduation_support_tables[0] if graduation_support_tables else _extract_syllabus_support_details(text)
     syllabus_support = {key: value["strength"] for key, value in syllabus_support_details.items() if value.get("strength")}
     if not syllabus_support:
         _add(result, "R-GRAD-003", "中", "课程目标与毕业要求的关系表", "未能从大纲中识别出明确的毕业要求支撑关系。", "请确认表格中包含毕业要求编号和 H/M/L 支撑强度。")
@@ -1362,14 +1366,59 @@ def _safe_cell_text(value: object) -> str:
     return "" if text.lower() in {"nan", "none", "nat"} else text
 
 
-def _find_catalog_row(course_catalog: pd.DataFrame, code: str | None) -> pd.Series | None:
+def _find_catalog_row(
+    course_catalog: pd.DataFrame,
+    code: str | None,
+    name: str | None = None,
+    preferred_values: dict[str, object] | None = None,
+) -> pd.Series | None:
     if course_catalog.empty or not code:
         return None
     clean_code = _normalize_course_code(code)
     rows = course_catalog[course_catalog["课程代码"].map(_normalize_course_code) == clean_code]
     if rows.empty:
         return None
-    return rows.iloc[0]
+    selected = rows.iloc[0]
+    clean_name = _canonical_compare_text(name)
+    if clean_name:
+        same_name_rows = course_catalog[course_catalog["课程名称"].map(_canonical_compare_text) == clean_name]
+        if len(same_name_rows) > 1 and _canonical_compare_text(selected.get("课程名称", "")) == clean_name:
+            best_row = _best_catalog_row(same_name_rows, preferred_values)
+            return best_row if best_row is not None else selected
+    return selected
+
+
+def _best_catalog_row(rows: pd.DataFrame, preferred_values: dict[str, object] | None) -> pd.Series | None:
+    if rows.empty:
+        return None
+    if not preferred_values:
+        return rows.iloc[0]
+    best_row: pd.Series | None = None
+    best_score = -1
+    for _, row in rows.iterrows():
+        score = 0
+        for column, actual in preferred_values.items():
+            expected = _safe_cell_text(row.get(column, ""))
+            if expected and actual is not None and not _values_differ(actual, expected):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_row = row
+    return best_row
+
+
+def _should_skip_week_hour_catalog_compare(
+    column: str,
+    actual: object,
+    category: str | None,
+    course_name: str | None,
+    expected_category: str | None,
+) -> bool:
+    if column not in {"总学时", "实践学时"} or not _contains_week_unit(_safe_cell_text(actual)):
+        return False
+    category_text = _canonical_compare_text(category or expected_category or "")
+    name_text = _canonical_compare_text(course_name or "")
+    return category_text == "实践教育课程" or any(keyword in name_text for keyword in ["毕业设计", "毕业论文", "毕业实习"])
 
 
 def _values_differ(actual: object, expected: str) -> bool:
